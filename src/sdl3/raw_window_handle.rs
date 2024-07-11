@@ -1,227 +1,584 @@
-extern crate raw_window_handle;
-
-use self::raw_window_handle::{
-    HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
-};
+#[allow(unused_imports)]
 use crate::{sys::SDL_Window, video::Window};
 
-unsafe impl HasRawWindowHandle for Window {
-    #[doc(alias = "SDL_GetVersion")]
-    fn raw_window_handle(&self) -> RawWindowHandle {
-        use self::SDL_SYSWM_TYPE::*;
+pub mod rwh_impl {
+    #![allow(unused_imports)]
 
-        // Check if running on web before continuing,
-        // since SDL_GetWindowWMInfo will fail on emscripten
-        if cfg!(target_os = "emscripten") {
-            use self::raw_window_handle::WebWindowHandle;
-            let mut handle = WebWindowHandle::empty();
-            handle.id = 1;
-            return RawWindowHandle::Web(handle);
-        }
+    #[cfg(feature = "raw-window-handle-0-5")]
+    pub use super::rwh_0_5_impl::*;
 
-        let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
+    #[cfg(feature = "raw-window-handle-0-6")]
+    pub use super::rwh_0_6_impl::*;
+}
 
-        // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
-        // as that gives an error on certain systems
-        unsafe {
-            sys::SDL_GetVersion(&mut wm_info.version);
-            if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
-                panic!("Couldn't get SDL window info: {}", crate::get_error());
+#[allow(unused_imports)]
+pub use self::rwh_impl::*;
+
+#[cfg(feature = "raw-window-handle-0-6")]
+pub mod rwh_0_6_impl {
+    extern crate raw_window_handle_0_6;
+    use self::raw_window_handle_0_6::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle, WindowHandle,
+    };
+
+    use super::*;
+
+    impl HasWindowHandle for Window {
+        #[doc(alias = "SDL_GetVersion")]
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            use self::SDL_SYSWM_TYPE::*;
+
+            // Check if running on web before continuing,
+            // since SDL_GetWindowWMInfo will fail on emscripten
+            if cfg!(target_os = "emscripten") {
+                use self::raw_window_handle_0_6::WebWindowHandle;
+                let id = 1;
+                let handle = WebWindowHandle::new(id);
+                return Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Web(handle)) });
+            }
+
+            let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
+
+            // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
+            // as that gives an error on certain systems
+            unsafe {
+                sys::SDL_GetVersion(&mut wm_info.version);
+                if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
+                    panic!("Couldn't get SDL window info: {}", crate::get_error());
+                }
+            }
+
+            match wm_info.subsystem {
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINDOWS => {
+                    use self::raw_window_handle_0_6::Win32WindowHandle;
+                    let window = unsafe { wm_info.info.win }.window;
+                    if window.is_null() {
+                        return Err(HandleError::Unavailable);
+                    }
+
+                    let hwnd = *window as isize;
+                    match std::num::NonZeroIsize::new(hwnd) {
+                        Some(hwnd) => {
+                            let handle = Win32WindowHandle::new(hwnd);
+                            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+                        }
+
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
+
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINRT => {
+                    use self::raw_window_handle_0_6::WinRtWindowHandle;
+
+                    let core_window = unsafe { wm_info.info.winrt }.core_window;
+
+                    match std::ptr::NonNull::new(core_window) {
+                        Some(core_window) => {
+                            let handle = WinRtWindowHandle::new(core_window);
+                            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::WinRt(handle)) })
+                        }
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
+
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_WAYLAND => {
+                    use self::raw_window_handle_0_6::WaylandWindowHandle;
+
+                    let surface = unsafe { wm_info.info.wl }.surface as *mut libc::c_void;
+
+                    match std::ptr::NonNull::new(surface) {
+                        Some(ptr) => {
+                            let handle = WaylandWindowHandle::new(ptr);
+                            Ok(unsafe {
+                                WindowHandle::borrow_raw(RawWindowHandle::Wayland(handle))
+                            })
+                        }
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
+
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_X11 => {
+                    use self::raw_window_handle_0_6::XlibWindowHandle;
+
+                    let window = unsafe { wm_info.info.x11 }.window;
+                    let handle = XlibWindowHandle::new(window);
+
+                    Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xlib(handle)) })
+                }
+
+                #[cfg(target_os = "macos")]
+                SDL_SYSWM_COCOA => {
+                    use self::raw_window_handle_0_6::AppKitWindowHandle;
+
+                    let ns_window = unsafe { wm_info.info.cocoa }.window as *mut libc::c_void;
+                    match std::ptr::NonNull::new(ns_window) {
+                        Some(ns_window) => {
+                            let mut handle = AppKitWindowHandle::new(ns_window);
+                            Ok(
+                                unsafe {
+                                    WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle))
+                                },
+                            )
+                        }
+
+                        None => {
+                            println!("ns_view not initialized, please call WindowBuilder::metal_view() when building the window");
+                            Err(HandleError::Unavailable)
+                        }
+                    }
+                }
+
+                #[cfg(any(target_os = "ios"))]
+                SDL_SYSWM_UIKIT => {
+                    use self::raw_window_handle_0_6::UiKitWindowHandle;
+
+                    let handle = UiKitWindowHandle::new(
+                        unsafe { wm_info.info.uikit }.window as *mut libc::c_void,
+                    );
+
+                    Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::UiKit(handle)) })
+                }
+
+                #[cfg(any(target_os = "android"))]
+                SDL_SYSWM_ANDROID => {
+                    use self::raw_window_handle_0_6::AndroidNdkWindowHandle;
+
+                    let a_native_window =
+                        unsafe { wm_info.info.android }.window as *mut libc::c_void;
+
+                    match std::ptr::NonNull::new(a_native_window) {
+                        Some(a_native_window) => {
+                            let handle = AndroidNdkWindowHandle::new(a_native_window);
+
+                            Ok(unsafe {
+                                WindowHandle::borrow_raw(RawWindowHandle::AndroidNdk(handle))
+                            })
+                        }
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
+
+                x => {
+                    let window_system = match x {
+                        SDL_SYSWM_DIRECTFB => "DirectFB",
+                        SDL_SYSWM_MIR => "Mir",
+                        SDL_SYSWM_VIVANTE => "Vivante",
+
+                        SDL_SYSWM_UNKNOWN => "Unknown",
+                        SDL_SYSWM_WINDOWS => "Windows",
+                        SDL_SYSWM_COCOA => "Cocoa",
+                        SDL_SYSWM_UIKIT => "Uikit",
+                        SDL_SYSWM_WAYLAND => "Wayland",
+                        SDL_SYSWM_WINRT => "WinRT",
+                        SDL_SYSWM_ANDROID => "Android",
+
+                        SDL_SYSWM_X11 => "X11",
+                        SDL_SYSWM_OS2 => "OS2",
+                    };
+
+                    println!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+
+                    Err(HandleError::NotSupported)
+                }
             }
         }
+    }
 
-        match wm_info.subsystem {
-            #[cfg(target_os = "windows")]
-            SDL_SYSWM_WINDOWS => {
-                use self::raw_window_handle::Win32WindowHandle;
+    impl HasDisplayHandle for Window {
+        #[doc(alias = "SDL_GetVersion")]
+        fn display_handle(&self) -> Result<DisplayHandle, HandleError> {
+            use self::SDL_SYSWM_TYPE::*;
 
-                let mut handle = Win32WindowHandle::empty();
-                handle.hwnd = unsafe { wm_info.info.win }.window as *mut libc::c_void;
-                handle.hinstance = unsafe { wm_info.info.win }.hinstance as *mut libc::c_void;
-
-                RawWindowHandle::Win32(handle)
+            // Check if running on web before continuing,
+            // since SDL_GetWindowWMInfo will fail on emscripten
+            if cfg!(target_os = "emscripten") {
+                use self::raw_window_handle_0_6::WebDisplayHandle;
+                let handle = WebDisplayHandle::new();
+                return Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Web(handle)) });
             }
-            #[cfg(target_os = "windows")]
-            SDL_SYSWM_WINRT => {
-                use self::raw_window_handle::WinRtWindowHandle;
 
-                let mut handle = WinRtWindowHandle::empty();
-                handle.core_window = unsafe { wm_info.info.winrt }.core_window;
+            let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
 
-                RawWindowHandle::WinRt(handle)
+            // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
+            // as that gives an error on certain systems
+            unsafe {
+                sys::SDL_GetVersion(&mut wm_info.version);
+                if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
+                    panic!("Couldn't get SDL window info: {}", crate::get_error());
+                }
             }
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-            ))]
-            SDL_SYSWM_WAYLAND => {
-                use self::raw_window_handle::WaylandWindowHandle;
 
-                let mut handle = WaylandWindowHandle::empty();
-                handle.surface = unsafe { wm_info.info.wl }.surface as *mut libc::c_void;
+            match wm_info.subsystem {
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINDOWS | SDL_SYSWM_WINRT => {
+                    use self::raw_window_handle_0_6::WindowsDisplayHandle;
+                    let handle = WindowsDisplayHandle::new();
+                    Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Windows(handle)) })
+                }
 
-                RawWindowHandle::Wayland(handle)
-            }
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-            ))]
-            SDL_SYSWM_X11 => {
-                use self::raw_window_handle::XlibWindowHandle;
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_WAYLAND => {
+                    use self::raw_window_handle_0_6::WaylandDisplayHandle;
 
-                let mut handle = XlibWindowHandle::empty();
-                handle.window = unsafe { wm_info.info.x11 }.window;
+                    let display = unsafe { wm_info.info.wl }.display as *mut libc::c_void;
 
-                RawWindowHandle::Xlib(handle)
-            }
-            #[cfg(target_os = "macos")]
-            SDL_SYSWM_COCOA => {
-                use self::raw_window_handle::AppKitWindowHandle;
+                    match std::ptr::NonNull::new(display) {
+                        Some(display) => {
+                            let handle = WaylandDisplayHandle::new(display);
+                            Ok(unsafe {
+                                DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(handle))
+                            })
+                        }
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
 
-                let mut handle = AppKitWindowHandle::empty();
-                handle.ns_window = unsafe { wm_info.info.cocoa }.window as *mut libc::c_void;
-                handle.ns_view = if self.context().metal_view.is_null() {
-                    panic!("metal_view not initialized, please call WindowBuilder::metal_view() when building the window");
-                } else {
-                    self.context().metal_view
-                };
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_X11 => {
+                    use self::raw_window_handle_0_6::XlibDisplayHandle;
 
-                RawWindowHandle::AppKit(handle)
-            }
-            #[cfg(any(target_os = "ios"))]
-            SDL_SYSWM_UIKIT => {
-                use self::raw_window_handle::UiKitWindowHandle;
+                    let display = unsafe { wm_info.info.x11 }.display as *mut libc::c_void;
 
-                let mut handle = UiKitHandle::empty();
-                handle.ui_window = unsafe { wm_info.info.uikit }.window as *mut libc::c_void;
-                handle.ui_view = 0 as *mut libc::c_void; // consumer of RawWindowHandle should determine this
+                    match std::ptr::NonNull::new(display) {
+                        Some(display) => {
+                            let screen = 0;
+                            let handle = XlibDisplayHandle::new(Some(display), screen);
 
-                RawWindowHandle::UiKit(handle)
-            }
-            #[cfg(any(target_os = "android"))]
-            SDL_SYSWM_ANDROID => {
-                use self::raw_window_handle::AndroidNdkWindowHandle;
+                            Ok(
+                                unsafe {
+                                    DisplayHandle::borrow_raw(RawDisplayHandle::Xlib(handle))
+                                },
+                            )
+                        }
 
-                let mut handle = AndroidNdkWindowHandle::empty();
-                handle.a_native_window =
-                    unsafe { wm_info.info.android }.window as *mut libc::c_void;
+                        None => Err(HandleError::Unavailable),
+                    }
+                }
 
-                RawWindowHandle::AndroidNdk(handle)
-            }
-            x => {
-                let window_system = match x {
-                    SDL_SYSWM_DIRECTFB => "DirectFB",
-                    SDL_SYSWM_MIR => "Mir",
-                    SDL_SYSWM_VIVANTE => "Vivante",
-                    _ => unreachable!(),
-                };
-                panic!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+                #[cfg(target_os = "macos")]
+                SDL_SYSWM_COCOA => {
+                    use self::raw_window_handle_0_6::AppKitDisplayHandle;
+                    let handle = AppKitDisplayHandle::new();
+                    Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(handle)) })
+                }
+
+                #[cfg(any(target_os = "ios"))]
+                SDL_SYSWM_UIKIT => {
+                    use self::raw_window_handle_0_6::UiKitDisplayHandle;
+                    let handle = UiKitDisplayHandle::new();
+                    Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::UiKit(handle)) })
+                }
+
+                #[cfg(any(target_os = "android"))]
+                SDL_SYSWM_ANDROID => {
+                    use self::raw_window_handle_0_6::AndroidDisplayHandle;
+                    let handle = AndroidDisplayHandle::new();
+                    Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Android(handle)) })
+                }
+
+                x => {
+                    let window_system = match x {
+                        SDL_SYSWM_DIRECTFB => "DirectFB",
+                        SDL_SYSWM_MIR => "Mir",
+                        SDL_SYSWM_VIVANTE => "Vivante",
+
+                        SDL_SYSWM_UNKNOWN => "Unknown",
+                        SDL_SYSWM_WINDOWS => "Windows",
+                        SDL_SYSWM_COCOA => "Cocoa",
+                        SDL_SYSWM_UIKIT => "Uikit",
+                        SDL_SYSWM_WAYLAND => "Wayland",
+                        SDL_SYSWM_WINRT => "WinRT",
+                        SDL_SYSWM_ANDROID => "Android",
+
+                        SDL_SYSWM_X11 => "X11",
+                        SDL_SYSWM_OS2 => "OS2",
+                    };
+                    println!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+
+                    Err(HandleError::NotSupported)
+                }
             }
         }
     }
 }
 
-unsafe impl HasRawDisplayHandle for Window {
-    #[doc(alias = "SDL_GetVersion")]
-    fn raw_display_handle(&self) -> RawDisplayHandle {
-        use self::SDL_SYSWM_TYPE::*;
+#[cfg(feature = "raw-window-handle-0-5")]
+pub mod rwh_0_5_impl {
+    use super::*;
 
-        // Check if running on web before continuing,
-        // since SDL_GetWindowWMInfo will fail on emscripten
-        if cfg!(target_os = "emscripten") {
-            use self::raw_window_handle::WebDisplayHandle;
-            let handle = WebDisplayHandle::empty();
-            return RawDisplayHandle::Web(handle);
-        }
+    use crate::{sys::SDL_Window, video::Window};
+    use raw_window_handle::{
+        HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
+    };
 
-        let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
+    unsafe impl HasRawWindowHandle for Window {
+        #[doc(alias = "SDL_GetVersion")]
+        fn raw_window_handle(&self) -> RawWindowHandle {
+            use self::SDL_SYSWM_TYPE::*;
 
-        // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
-        // as that gives an error on certain systems
-        unsafe {
-            sys::SDL_GetVersion(&mut wm_info.version);
-            if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
-                panic!("Couldn't get SDL window info: {}", crate::get_error());
+            // Check if running on web before continuing,
+            // since SDL_GetWindowWMInfo will fail on emscripten
+            if cfg!(target_os = "emscripten") {
+                use self::raw_window_handle::WebWindowHandle;
+                let mut handle = WebWindowHandle::empty();
+                handle.id = 1;
+                return RawWindowHandle::Web(handle);
+            }
+
+            let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
+
+            // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
+            // as that gives an error on certain systems
+            unsafe {
+                sys::SDL_GetVersion(&mut wm_info.version);
+                if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
+                    panic!("Couldn't get SDL window info: {}", crate::get_error());
+                }
+            }
+
+            match wm_info.subsystem {
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINDOWS => {
+                    use self::raw_window_handle::Win32WindowHandle;
+
+                    let mut handle = Win32WindowHandle::empty();
+                    handle.hwnd = unsafe { wm_info.info.win }.window as *mut libc::c_void;
+                    handle.hinstance = unsafe { wm_info.info.win }.hinstance as *mut libc::c_void;
+
+                    RawWindowHandle::Win32(handle)
+                }
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINRT => {
+                    use self::raw_window_handle::WinRtWindowHandle;
+
+                    let mut handle = WinRtWindowHandle::empty();
+                    handle.core_window = unsafe { wm_info.info.winrt }.core_window;
+
+                    RawWindowHandle::WinRt(handle)
+                }
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_WAYLAND => {
+                    use self::raw_window_handle::WaylandWindowHandle;
+
+                    let mut handle = WaylandWindowHandle::empty();
+                    handle.surface = unsafe { wm_info.info.wl }.surface as *mut libc::c_void;
+
+                    RawWindowHandle::Wayland(handle)
+                }
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_X11 => {
+                    use self::raw_window_handle::XlibWindowHandle;
+
+                    let mut handle = XlibWindowHandle::empty();
+                    handle.window = unsafe { wm_info.info.x11 }.window;
+
+                    RawWindowHandle::Xlib(handle)
+                }
+                #[cfg(target_os = "macos")]
+                SDL_SYSWM_COCOA => {
+                    use self::raw_window_handle::AppKitWindowHandle;
+
+                    let mut handle = AppKitWindowHandle::empty();
+                    handle.ns_window = unsafe { wm_info.info.cocoa }.window as *mut libc::c_void;
+                    handle.ns_view = if self.context().metal_view.is_null() {
+                        panic!("metal_view not initialized, please call WindowBuilder::metal_view() when building the window");
+                    } else {
+                        self.context().metal_view
+                    };
+
+                    RawWindowHandle::AppKit(handle)
+                }
+                #[cfg(any(target_os = "ios"))]
+                SDL_SYSWM_UIKIT => {
+                    use self::raw_window_handle::UiKitWindowHandle;
+
+                    let mut handle = UiKitHandle::empty();
+                    handle.ui_window = unsafe { wm_info.info.uikit }.window as *mut libc::c_void;
+                    handle.ui_view = 0 as *mut libc::c_void; // consumer of RawWindowHandle should determine this
+
+                    RawWindowHandle::UiKit(handle)
+                }
+                #[cfg(any(target_os = "android"))]
+                SDL_SYSWM_ANDROID => {
+                    use self::raw_window_handle::AndroidNdkWindowHandle;
+
+                    let mut handle = AndroidNdkWindowHandle::empty();
+                    handle.a_native_window =
+                        unsafe { wm_info.info.android }.window as *mut libc::c_void;
+
+                    RawWindowHandle::AndroidNdk(handle)
+                }
+                x => {
+                    let window_system = match x {
+                        SDL_SYSWM_DIRECTFB => "DirectFB",
+                        SDL_SYSWM_MIR => "Mir",
+                        SDL_SYSWM_VIVANTE => "Vivante",
+
+                        SDL_SYSWM_UNKNOWN => "Unknown",
+                        SDL_SYSWM_WINDOWS => "Windows",
+                        SDL_SYSWM_COCOA => "Cocoa",
+                        SDL_SYSWM_UIKIT => "Uikit",
+                        SDL_SYSWM_WAYLAND => "Wayland",
+                        SDL_SYSWM_WINRT => "WinRT",
+                        SDL_SYSWM_ANDROID => "Android",
+
+                        SDL_SYSWM_X11 => "X11",
+                        SDL_SYSWM_OS2 => "OS2",
+                    };
+                    panic!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+                }
             }
         }
+    }
 
-        match wm_info.subsystem {
-            #[cfg(target_os = "windows")]
-            SDL_SYSWM_WINDOWS | SDL_SYSWM_WINRT => {
-                use self::raw_window_handle::WindowsDisplayHandle;
+    unsafe impl HasRawDisplayHandle for Window {
+        #[doc(alias = "SDL_GetVersion")]
+        fn raw_display_handle(&self) -> RawDisplayHandle {
+            use self::SDL_SYSWM_TYPE::*;
 
-                let mut handle = WindowsDisplayHandle::empty();
-
-                RawDisplayHandle::Windows(handle)
+            // Check if running on web before continuing,
+            // since SDL_GetWindowWMInfo will fail on emscripten
+            if cfg!(target_os = "emscripten") {
+                use self::raw_window_handle::WebDisplayHandle;
+                let handle = WebDisplayHandle::empty();
+                return RawDisplayHandle::Web(handle);
             }
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-            ))]
-            SDL_SYSWM_WAYLAND => {
-                use self::raw_window_handle::WaylandDisplayHandle;
 
-                let mut handle = WaylandDisplayHandle::empty();
-                handle.display = unsafe { wm_info.info.wl }.display as *mut libc::c_void;
+            let mut wm_info: SDL_SysWMinfo = unsafe { std::mem::zeroed() };
 
-                RawDisplayHandle::Wayland(handle)
+            // Make certain to retrieve version before querying `SDL_GetWindowWMInfo`
+            // as that gives an error on certain systems
+            unsafe {
+                sys::SDL_GetVersion(&mut wm_info.version);
+                if SDL_GetWindowWMInfo(self.raw(), &mut wm_info) == SDL_bool::SDL_FALSE {
+                    panic!("Couldn't get SDL window info: {}", crate::get_error());
+                }
             }
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "dragonfly",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-            ))]
-            SDL_SYSWM_X11 => {
-                use self::raw_window_handle::XlibDisplayHandle;
 
-                let mut handle = XlibDisplayHandle::empty();
-                handle.display = unsafe { wm_info.info.x11 }.display as *mut libc::c_void;
+            match wm_info.subsystem {
+                #[cfg(target_os = "windows")]
+                SDL_SYSWM_WINDOWS | SDL_SYSWM_WINRT => {
+                    use self::raw_window_handle::WindowsDisplayHandle;
 
-                RawDisplayHandle::Xlib(handle)
-            }
-            #[cfg(target_os = "macos")]
-            SDL_SYSWM_COCOA => {
-                use self::raw_window_handle::AppKitDisplayHandle;
-                let handle = AppKitDisplayHandle::empty();
-                RawDisplayHandle::AppKit(handle)
-            }
-            #[cfg(any(target_os = "ios"))]
-            SDL_SYSWM_UIKIT => {
-                use self::raw_window_handle::UiKitDisplayHandle;
+                    let mut handle = WindowsDisplayHandle::empty();
 
-                let mut handle = UiKitDisplayHandle::empty();
+                    RawDisplayHandle::Windows(handle)
+                }
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_WAYLAND => {
+                    use self::raw_window_handle::WaylandDisplayHandle;
 
-                RawDisplayHandle::UiKit(handle)
-            }
-            #[cfg(any(target_os = "android"))]
-            SDL_SYSWM_ANDROID => {
-                use self::raw_window_handle::AndroidDisplayHandle;
+                    let mut handle = WaylandDisplayHandle::empty();
+                    handle.display = unsafe { wm_info.info.wl }.display as *mut libc::c_void;
 
-                let mut handle = AndroidDisplayHandle::empty();
-                handle.a_native_window =
-                    unsafe { wm_info.info.android }.window as *mut libc::c_void;
+                    RawDisplayHandle::Wayland(handle)
+                }
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "dragonfly",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ))]
+                SDL_SYSWM_X11 => {
+                    use self::raw_window_handle::XlibDisplayHandle;
 
-                RawDisplayHandle::Android(handle)
-            }
-            x => {
-                let window_system = match x {
-                    SDL_SYSWM_DIRECTFB => "DirectFB",
-                    SDL_SYSWM_MIR => "Mir",
-                    SDL_SYSWM_VIVANTE => "Vivante",
-                    _ => unreachable!(),
-                };
-                panic!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+                    let mut handle = XlibDisplayHandle::empty();
+                    handle.display = unsafe { wm_info.info.x11 }.display as *mut libc::c_void;
+
+                    RawDisplayHandle::Xlib(handle)
+                }
+                #[cfg(target_os = "macos")]
+                SDL_SYSWM_COCOA => {
+                    use self::raw_window_handle::AppKitDisplayHandle;
+                    let handle = AppKitDisplayHandle::empty();
+                    RawDisplayHandle::AppKit(handle)
+                }
+                #[cfg(any(target_os = "ios"))]
+                SDL_SYSWM_UIKIT => {
+                    use self::raw_window_handle::UiKitDisplayHandle;
+
+                    let mut handle = UiKitDisplayHandle::empty();
+
+                    RawDisplayHandle::UiKit(handle)
+                }
+                #[cfg(any(target_os = "android"))]
+                SDL_SYSWM_ANDROID => {
+                    use self::raw_window_handle::AndroidDisplayHandle;
+
+                    let mut handle = AndroidDisplayHandle::empty();
+                    handle.a_native_window =
+                        unsafe { wm_info.info.android }.window as *mut libc::c_void;
+
+                    RawDisplayHandle::Android(handle)
+                }
+
+                x => {
+                    let window_system = match x {
+                        SDL_SYSWM_DIRECTFB => "DirectFB",
+                        SDL_SYSWM_MIR => "Mir",
+                        SDL_SYSWM_VIVANTE => "Vivante",
+
+                        SDL_SYSWM_UNKNOWN => "Unknown",
+                        SDL_SYSWM_WINDOWS => "Windows",
+                        SDL_SYSWM_COCOA => "Cocoa",
+                        SDL_SYSWM_UIKIT => "Uikit",
+                        SDL_SYSWM_WAYLAND => "Wayland",
+                        SDL_SYSWM_WINRT => "WinRT",
+                        SDL_SYSWM_ANDROID => "Android",
+
+                        SDL_SYSWM_X11 => "X11",
+                        SDL_SYSWM_OS2 => "OS2",
+                    };
+                    panic!("{} window system is not supported, please file issue with raw-window-handle: https://github.com/rust-windowing/raw-window-handle/issues/new", window_system);
+                }
             }
         }
     }

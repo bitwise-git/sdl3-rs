@@ -1,9 +1,47 @@
-#[cfg(feature = "raw-window-handle")]
+#[cfg(feature = "raw-window-handle-0-6")]
 mod raw_window_handle_test {
-    extern crate raw_window_handle;
+    extern crate raw_window_handle_0_6;
     extern crate sdl3;
 
-    use self::raw_window_handle::{
+    use self::raw_window_handle_0_6::{HasDisplayHandle, HasWindowHandle};
+    use self::sdl3::video::Window;
+
+    #[test]
+    fn get_handles() {
+        let window = new_hidden_window();
+        match window.window_handle() {
+            Ok(_) => {
+                println!("Successfully received WindowHandle!");
+            }
+
+            x => assert!(false, "Could not receive WindowHandle: {:?}", x),
+        }
+
+        match window.display_handle() {
+            Ok(_) => {}
+
+            x => assert!(false, "Could not receive DisplayHandle: {:?}", x),
+        }
+    }
+
+    pub fn new_hidden_window() -> Window {
+        let context = sdl3::init().unwrap();
+        let video_subsystem = context.video().unwrap();
+        video_subsystem
+            .window("Hello, World!", 800, 600)
+            .hidden()
+            .metal_view()
+            .build()
+            .unwrap()
+    }
+}
+
+#[cfg(feature = "raw-window-handle-0-5")]
+mod raw_window_handle_test {
+    extern crate raw_window_handle_0_5;
+    extern crate sdl3;
+
+    use self::raw_window_handle_0_5::{
         HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle,
     };
     use self::sdl3::video::Window;
